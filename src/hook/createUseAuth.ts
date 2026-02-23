@@ -11,7 +11,7 @@ export type UseAuthDeps = {
 
   getLanguage: () => string;
 
-  // optional post-signup navigation
+  // optional post-signup navigation (MUST be a plain function, not calling hooks)
   navigate?: (path: string, opts?: { replace?: boolean }) => void;
 
   // optional verify path resolver
@@ -34,6 +34,8 @@ export type UseAuthResult = {
   confirmEmail: (hash: string) => Promise<void>;
 };
 
+const ME_QUERY_KEY = ["auth", "me"] as const;
+
 export function createUseAuth(deps: UseAuthDeps) {
   return function useAuth(): UseAuthResult {
     const queryClient = useQueryClient();
@@ -41,28 +43,28 @@ export function createUseAuth(deps: UseAuthDeps) {
     const token = deps.getToken();
     const lang = deps.getLanguage();
 
+    // --- current user (me) ---
     const meQuery = useQuery<AuthUser | null>({
-      queryKey: ["auth", "me", token],
-      queryFn: () => deps.authService.me(lang),
+      queryKey: [...ME_QUERY_KEY, token] as const,
+      queryFn: async () => deps.authService.me(lang),
       enabled: !!token,
       staleTime: 1000 * 60,
       retry: 1,
     });
 
+    // --- login ---
     const loginMutation = useMutation({
       mutationFn: (payload: { email: string; password: string }) =>
         deps.authService.login(payload, lang),
-
       onSuccess: async (newToken) => {
         deps.setToken(newToken);
 
-        // Important: ensure me() refetches under new token
-        await queryClient.invalidateQueries({
-          queryKey: ["auth", "me"],
-        });
+        // Refetch user under new token
+        await queryClient.invalidateQueries({ queryKey: ME_QUERY_KEY });
       },
     });
 
+    // --- signup ---
     const signupMutation = useMutation({
       mutationFn: (payload: {
         email: string;
@@ -70,38 +72,37 @@ export function createUseAuth(deps: UseAuthDeps) {
         acceptTerms: boolean;
         acceptPrivacyPolicy: boolean;
       }) => deps.authService.register(payload, lang),
-
       onSuccess: async () => {
+        // Optional redirect to verify page
         if (deps.navigate && deps.getVerifyPath) {
-          const verifyPath = deps.getVerifyPath(lang);
-          deps.navigate(verifyPath, { replace: true });
+          deps.navigate(deps.getVerifyPath(lang), { replace: true });
         }
       },
     });
 
+    // --- logout ---
     const logoutMutation = useMutation({
       mutationFn: async () => {
         try {
           await deps.authService.logout(lang);
         } catch {
-          // ignore network failure
+          // ignore network failures on logout
         }
       },
-
       onSuccess: async () => {
         deps.setToken(null);
 
-        // Remove cached user completely
-        await queryClient.removeQueries({
-          queryKey: ["auth", "me"],
-        });
+        // Hard-clear cached user (avoid showing stale user)
+        await queryClient.removeQueries({ queryKey: ME_QUERY_KEY });
       },
     });
 
+    // --- confirm email ---
     const confirmEmailMutation = useMutation({
       mutationFn: (hash: string) => deps.authService.confirmEmail(hash, lang),
     });
 
+    // --- stable API ---
     const login = useCallback(
       async (email: string, password: string) => {
         await loginMutation.mutateAsync({ email, password });
@@ -131,7 +132,9 @@ export function createUseAuth(deps: UseAuthDeps) {
     }, [logoutMutation]);
 
     const confirmEmail = useCallback(
-      (hash: string) => confirmEmailMutation.mutateAsync(hash),
+      async (hash: string) => {
+        await confirmEmailMutation.mutateAsync(hash);
+      },
       [confirmEmailMutation],
     );
 
