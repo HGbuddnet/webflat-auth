@@ -1,20 +1,21 @@
 import { useCallback } from "react";
-import { AuthService } from "../service";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AuthUser } from "../types/auth.types";
+import type { AuthService } from "../service";
+import type { AuthUser } from "../types/auth.types";
 
 export type UseAuthDeps = {
   authService: AuthService;
 
-  // token storage
   getToken: () => string | null;
   setToken: (token: string | null) => void;
 
-  // language provider
   getLanguage: () => string;
 
-  // navigation (optional)
+  // optional post-signup navigation
   navigate?: (path: string, opts?: { replace?: boolean }) => void;
+
+  // optional verify path resolver
+  getVerifyPath?: (lang: string) => string;
 };
 
 export type UseAuthResult = {
@@ -41,7 +42,7 @@ export function createUseAuth(deps: UseAuthDeps) {
     const lang = deps.getLanguage();
 
     const meQuery = useQuery<AuthUser | null>({
-      queryKey: ["auth", "me"],
+      queryKey: ["auth", "me", token],
       queryFn: () => deps.authService.me(lang),
       enabled: !!token,
       staleTime: 1000 * 60,
@@ -51,9 +52,14 @@ export function createUseAuth(deps: UseAuthDeps) {
     const loginMutation = useMutation({
       mutationFn: (payload: { email: string; password: string }) =>
         deps.authService.login(payload, lang),
-      onSuccess: async (result) => {
-        deps.setToken(result);
-        await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
+
+      onSuccess: async (newToken) => {
+        deps.setToken(newToken);
+
+        // Important: ensure me() refetches under new token
+        await queryClient.invalidateQueries({
+          queryKey: ["auth", "me"],
+        });
       },
     });
 
@@ -64,17 +70,31 @@ export function createUseAuth(deps: UseAuthDeps) {
         acceptTerms: boolean;
         acceptPrivacyPolicy: boolean;
       }) => deps.authService.register(payload, lang),
+
+      onSuccess: async () => {
+        if (deps.navigate && deps.getVerifyPath) {
+          const verifyPath = deps.getVerifyPath(lang);
+          deps.navigate(verifyPath, { replace: true });
+        }
+      },
     });
 
     const logoutMutation = useMutation({
       mutationFn: async () => {
         try {
           await deps.authService.logout(lang);
-        } catch {}
+        } catch {
+          // ignore network failure
+        }
       },
+
       onSuccess: async () => {
         deps.setToken(null);
-        await queryClient.resetQueries({ queryKey: ["auth", "me"] });
+
+        // Remove cached user completely
+        await queryClient.removeQueries({
+          queryKey: ["auth", "me"],
+        });
       },
     });
 
